@@ -1,0 +1,10 @@
+{
+  "endpoint_url": "https://onefs-s3.example.com",
+  "access_key": "ACCESS_KEY",
+  "secret_key": "SECRET_KEY",
+  "region_name": "us-east-1",
+  "bucket_name": "my-bucket",
+  "verify_ssl": true,
+  "ca_bundle": "",
+  "s3_addressing_style": "path"
+}
