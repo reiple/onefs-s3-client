@@ -14,10 +14,13 @@ permissions:
 env:
   PYTHON_VERSION: '3.12'
   APP_NAME: onefs-s3
-  # glibc 2.17 (CentOS 7) 기반 빌드 이미지.
-  # 여기서 만든 바이너리는 RHEL/CentOS 7·8·9, Ubuntu 14.04+ 에서 동작한다.
-  # RHEL 8 이상만 지원해도 된다면 quay.io/pypa/manylinux_2_28_x86_64 로 교체 가능.
-  MANYLINUX_IMAGE: quay.io/pypa/manylinux2014_x86_64
+  # glibc 2.28 (RHEL 8 바이너리 호환) 기반 빌드 이미지.
+  # 여기서 만든 바이너리는 RHEL/CentOS 8·9, Ubuntu 20.04+ 에서 동작한다.
+  #
+  # manylinux 이미지를 쓰지 않는 이유: 해당 CPython 은 휠 빌드 전용이라
+  # --enable-shared 없이 빌드되어 libpython3.12.so 가 없고, PyInstaller 가
+  # "Python was built without a shared library" 로 실패한다.
+  LINUX_BUILD_IMAGE: almalinux:8
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -108,12 +111,12 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  # Linux x86_64 빌드 (manylinux 컨테이너 = glibc 2.17)
+  # Linux x86_64 빌드 (AlmaLinux 8 컨테이너 = glibc 2.28)
   #
-  # `container:` 키를 쓰지 않는 이유:
-  #   actions/checkout@v4 는 Node 20 런타임을 쓰는데 Node 20 은 glibc 2.28 이상을
-  #   요구한다. glibc 2.17 컨테이너 안에서는 checkout 자체가 실행되지 않는다.
-  #   따라서 checkout 은 호스트에서 하고, 빌드만 docker run 으로 위임한다.
+  # `container:` 키 대신 docker run 을 쓰는 이유:
+  #   컨테이너 안에서 실행되는 것은 빌드뿐이고 checkout 은 호스트에서 끝내,
+  #   빌드 이미지를 더 오래된 배포판으로 낮출 때 actions/* 의 Node 런타임
+  #   glibc 요구사항에 발목 잡히지 않도록 하기 위함이다.
   # ---------------------------------------------------------------------------
   build-linux:
     needs: [ version, test ]
@@ -161,8 +164,7 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - 'centos:7'      # CentOS 7            (glibc 2.17)
-          - 'almalinux:8'   # RHEL 8 / CentOS 8   (glibc 2.28)
+          - 'almalinux:8'   # RHEL 8 / CentOS 8   (glibc 2.28, 빌드 기준선)
           - 'almalinux:9'   # RHEL 9              (glibc 2.34)
           - 'ubuntu:20.04'  #                     (glibc 2.31)
           - 'ubuntu:22.04'  #                     (glibc 2.35)
@@ -179,10 +181,7 @@ jobs:
           tar -xzf dl/*.tar.gz -C app --strip-components=1
           ls -l app
 
-      # CentOS 7 은 EOL 되어 Docker Hub 아카이브에만 남아 있다.
-      # 이미지 pull 실패가 릴리스를 막지 않도록 이 항목만 비차단으로 둔다.
       - name: Run on ${{ matrix.image }}
-        continue-on-error: ${{ matrix.image == 'centos:7' }}
         run: |
           docker run --rm -v "$PWD/app":/opt/onefs-s3:ro "${{ matrix.image }}" \
             sh -c 'set -e
@@ -243,10 +242,11 @@ jobs:
           | 파일 | 대상 |
           | --- | --- |
           | `*-windows-x64.zip` | Windows Server 2016 이상 / Windows 10·11 (x64) |
-          | `*-linux-x86_64.tar.gz` | RHEL·CentOS 7/8/9, Ubuntu 14.04 이상 (x86_64) |
+          | `*-linux-x86_64.tar.gz` | RHEL·CentOS 8/9, Ubuntu 20.04 이상 (x86_64) |
 
-          Linux 바이너리는 glibc 2.17(CentOS 7) 환경에서 빌드되어
-          CentOS 7 · AlmaLinux 8/9 · Ubuntu 20.04/22.04/24.04 에서 실행 검증을 마쳤습니다.
+          Linux 바이너리는 glibc 2.28(RHEL 8 호환) 환경에서 빌드되어
+          AlmaLinux 8/9 · Ubuntu 20.04/22.04/24.04 에서 실행 검증을 마쳤습니다.
+          CentOS 7 / RHEL 7(glibc 2.17)은 지원 대상이 아닙니다.
 
           ```bash
           tar -xzf onefs-s3-*-linux-x86_64.tar.gz

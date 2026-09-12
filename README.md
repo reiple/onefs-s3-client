@@ -95,18 +95,23 @@ PyInstaller 는 Python 인터프리터는 번들에 넣지만 부트로더와 C 
 **빌드 머신의 glibc 에 동적 링크**합니다. glibc 는 하위 호환만 되므로,
 최신 Ubuntu 에서 빌드한 바이너리는 RHEL 8 에서 `GLIBC_2.34 not found` 로 실행되지 않습니다.
 
-그래서 Linux 빌드는 glibc 2.17(CentOS 7) 기반의 `quay.io/pypa/manylinux2014_x86_64`
-컨테이너 안에서 수행합니다. 결과 바이너리는 다음 환경에서 실행 검증됩니다.
+그래서 Linux 빌드는 glibc 2.28 기반의 `almalinux:8` 컨테이너 안에서 수행합니다.
+AlmaLinux 8 은 RHEL 8 과 바이너리 호환이며, 결과물은 다음 환경에서 실행 검증됩니다.
 
 | 배포판 | glibc |
 | --- | --- |
-| CentOS 7 | 2.17 |
-| RHEL 8 / CentOS 8 (AlmaLinux 8) | 2.28 |
+| RHEL 8 / CentOS 8 (AlmaLinux 8) | 2.28 (빌드 기준선) |
 | RHEL 9 (AlmaLinux 9) | 2.34 |
 | Ubuntu 20.04 / 22.04 / 24.04 | 2.31 / 2.35 / 2.39 |
 
-RHEL 8 이상만 지원하면 되는 경우 워크플로우의 `MANYLINUX_IMAGE` 를
-`quay.io/pypa/manylinux_2_28_x86_64` 로 바꾸면 빌드가 빨라집니다.
+`quay.io/pypa/manylinux*` 이미지는 사용할 수 없습니다. 해당 CPython 은 휠 빌드
+전용이라 `--enable-shared` 없이 빌드되어 `libpython3.12.so` 가 없고,
+PyInstaller 가 `Python was built without a shared library` 로 실패합니다.
+RHEL AppStream 의 `python3.12` 는 공유 라이브러리 빌드라 이 제약이 없습니다.
+
+> **CentOS 7 / RHEL 7 (glibc 2.17)은 지원 대상이 아닙니다.**
+> 두 배포판은 Python 3.12 패키지를 제공하지 않아(OpenSSL 1.0.2) 인터프리터를
+> 소스 빌드해야 합니다. 필요하면 별도 빌드 잡을 추가해야 합니다.
 
 ### 로컬 빌드
 
@@ -116,13 +121,13 @@ Windows:
 build.bat
 ```
 
-Linux (배포용, glibc 2.17 컨테이너 사용 — CI 와 동일한 산출물):
+Linux (배포용, glibc 2.28 컨테이너 사용 — CI 와 동일한 산출물):
 
 ```bash
 docker run --rm \
   -v "$PWD":/io -w /io \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-  quay.io/pypa/manylinux2014_x86_64 \
+  almalinux:8 \
   bash /io/packaging/build_linux_container.sh
 ```
 
