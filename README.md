@@ -61,32 +61,121 @@ python src\main.py --config C:\config\onefs.json test
 
 ## 빌드
 
+빌드 결과물은 PyInstaller onefile 실행 파일이며 **대상 서버에 Python 설치가 필요하지 않습니다.**
+Windows/Linux 모두 `packaging/onefs-s3.spec` 하나를 공유하므로 로컬 빌드와 CI 빌드 설정이 같습니다.
+
+### GitHub Actions (권장)
+
+`.github/workflows/build.yml` 이 Python 3.12 기준으로 Windows/Linux 바이너리를 만들고,
+실제 배포 대상 배포판에서 실행까지 검증합니다.
+
+| 트리거 | 동작 |
+| --- | --- |
+| `main` push / PR | 테스트 → 빌드 → 배포판 실행 검증 → artifact 업로드 |
+| `v*` 태그 push | 위 과정 + GitHub Release 생성 |
+| 수동 실행 | Actions 탭의 `Build & Release` → Run workflow |
+
+릴리스 생성 예시:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+산출물:
+
+```text
+onefs-s3-<version>-windows-x64.zip        (+ .sha256)
+onefs-s3-<version>-linux-x86_64.tar.gz    (+ .sha256)
+```
+
+### Linux 바이너리의 호환 범위
+
+PyInstaller 는 Python 인터프리터는 번들에 넣지만 부트로더와 C 확장 모듈은
+**빌드 머신의 glibc 에 동적 링크**합니다. glibc 는 하위 호환만 되므로,
+최신 Ubuntu 에서 빌드한 바이너리는 RHEL 8 에서 `GLIBC_2.34 not found` 로 실행되지 않습니다.
+
+그래서 Linux 빌드는 glibc 2.17(CentOS 7) 기반의 `quay.io/pypa/manylinux2014_x86_64`
+컨테이너 안에서 수행합니다. 결과 바이너리는 다음 환경에서 실행 검증됩니다.
+
+| 배포판 | glibc |
+| --- | --- |
+| CentOS 7 | 2.17 |
+| RHEL 8 / CentOS 8 (AlmaLinux 8) | 2.28 |
+| RHEL 9 (AlmaLinux 9) | 2.34 |
+| Ubuntu 20.04 / 22.04 / 24.04 | 2.31 / 2.35 / 2.39 |
+
+RHEL 8 이상만 지원하면 되는 경우 워크플로우의 `MANYLINUX_IMAGE` 를
+`quay.io/pypa/manylinux_2_28_x86_64` 로 바꾸면 빌드가 빨라집니다.
+
+### 로컬 빌드
+
+Windows:
+
 ```cmd
 build.bat
+```
+
+Linux (배포용, glibc 2.17 컨테이너 사용 — CI 와 동일한 산출물):
+
+```bash
+docker run --rm \
+  -v "$PWD":/io -w /io \
+  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  quay.io/pypa/manylinux2014_x86_64 \
+  bash /io/packaging/build_linux_container.sh
+```
+
+Linux (개발용, 현재 머신의 Python 3.12 사용):
+
+```bash
+./build.sh
 ```
 
 결과:
 
 ```text
-dist\onefs-s3.exe
+dist\onefs-s3.exe   (Windows)
+dist/onefs-s3       (Linux)
 ```
 
 ## 배포
 
-배포 대상 PC에는 기본적으로 다음 파일만 전달합니다.
+### Windows
 
 ```text
 onefs-s3.exe
 config.json
 ```
 
+### Linux
+
+```bash
+tar -xzf onefs-s3-<version>-linux-x86_64.tar.gz
+cd onefs-s3-<version>-linux-x86_64
+cp config.json.example config.json     # 값을 환경에 맞게 수정
+chmod +x onefs-s3
+./onefs-s3 test
+```
+
 사설 CA 인증서가 필요하면 함께 전달합니다.
 
 ```text
-certs\company-ca.pem
+certs/company-ca.pem
 ```
 
-배포 대상 PC에는 Python 설치가 필요하지 않습니다.
+`config.json` 과 `logs/` 는 실행 파일이 있는 디렉터리를 기준으로 찾습니다.
+`/usr/local/bin` 처럼 쓰기 권한이 없는 위치에 두려면 `--config` 로 경로를 지정하고,
+쓰기 가능한 작업 디렉터리에서 실행하세요.
+
+배포 대상 서버에는 Python 설치가 필요하지 않습니다.
+
+### 배포 시 참고
+
+- onefile 실행 파일은 기동할 때마다 자기 자신을 임시 디렉터리에 풀어 놓습니다.
+  `/tmp` 가 `noexec` 로 마운트된 서버에서는 `TMPDIR=/var/tmp/onefs-s3 ./onefs-s3 test`
+  처럼 실행 가능한 경로를 지정하세요.
+- 한글 메시지가 깨지면 로케일을 UTF-8 로 지정하세요: `LANG=ko_KR.UTF-8` 또는 `PYTHONUTF8=1`.
 
 ## 수동 테스트 시나리오
 

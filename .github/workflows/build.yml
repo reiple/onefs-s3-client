@@ -1,0 +1,267 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.12'
+  APP_NAME: onefs-s3
+  # glibc 2.17 (CentOS 7) 기반 빌드 이미지.
+  # 여기서 만든 바이너리는 RHEL/CentOS 7·8·9, Ubuntu 14.04+ 에서 동작한다.
+  # RHEL 8 이상만 지원해도 된다면 quay.io/pypa/manylinux_2_28_x86_64 로 교체 가능.
+  MANYLINUX_IMAGE: quay.io/pypa/manylinux2014_x86_64
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 배포 버전 문자열을 한 곳에서 계산해 모든 job 이 같은 파일명을 쓰게 한다.
+  # ---------------------------------------------------------------------------
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+    steps:
+      - id: compute
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "release version = ${version}"
+
+  # ---------------------------------------------------------------------------
+  # 단위 테스트: 패키징 전에 두 플랫폼 모두에서 통과해야 한다.
+  # ---------------------------------------------------------------------------
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+  # ---------------------------------------------------------------------------
+  # Windows x64 빌드
+  # ---------------------------------------------------------------------------
+  build-windows:
+    needs: [ version, test ]
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller --clean --noconfirm packaging/onefs-s3.spec
+
+      - name: Smoke test
+        run: .\dist\onefs-s3.exe --help
+
+      - name: Stage release package
+        shell: pwsh
+        run: |
+          $name = "$env:APP_NAME-$env:VERSION-windows-x64"
+          New-Item -ItemType Directory -Path "package\$name" | Out-Null
+          Copy-Item dist\onefs-s3.exe   "package\$name\"
+          Copy-Item config.json.example "package\$name\"
+          Copy-Item README.md           "package\$name\"
+          Compress-Archive -Path "package\$name" -DestinationPath "package\$name.zip"
+          $hash = (Get-FileHash "package\$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "package\$name.zip.sha256"
+          Get-ChildItem package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: package/*.zip*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Linux x86_64 빌드 (manylinux 컨테이너 = glibc 2.17)
+  #
+  # `container:` 키를 쓰지 않는 이유:
+  #   actions/checkout@v4 는 Node 20 런타임을 쓰는데 Node 20 은 glibc 2.28 이상을
+  #   요구한다. glibc 2.17 컨테이너 안에서는 checkout 자체가 실행되지 않는다.
+  #   따라서 checkout 은 호스트에서 하고, 빌드만 docker run 으로 위임한다.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    needs: [ version, test ]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build inside manylinux container
+        run: |
+          docker run --rm \
+            -v "$PWD":/io -w /io \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            "$MANYLINUX_IMAGE" \
+            bash /io/packaging/build_linux_container.sh
+
+      - name: Stage release package
+        run: |
+          name="${APP_NAME}-${VERSION}-linux-x86_64"
+          mkdir -p "package/${name}"
+          cp dist/onefs-s3       "package/${name}/"
+          cp config.json.example "package/${name}/"
+          cp README.md           "package/${name}/"
+          chmod +x "package/${name}/onefs-s3"
+          tar -czf "package/${name}.tar.gz" -C package "${name}"
+          ( cd package && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          ls -l package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: package/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 실제 배포 대상 배포판에서 Python 없이 실행되는지 검증한다.
+  # 이 job 이 통과해야만 릴리스가 생성된다.
+  # ---------------------------------------------------------------------------
+  verify-linux:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - 'centos:7'      # CentOS 7            (glibc 2.17)
+          - 'almalinux:8'   # RHEL 8 / CentOS 8   (glibc 2.28)
+          - 'almalinux:9'   # RHEL 9              (glibc 2.34)
+          - 'ubuntu:20.04'  #                     (glibc 2.31)
+          - 'ubuntu:22.04'  #                     (glibc 2.35)
+          - 'ubuntu:24.04'  #                     (glibc 2.39)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dl
+
+      - name: Extract
+        run: |
+          mkdir -p app
+          tar -xzf dl/*.tar.gz -C app --strip-components=1
+          ls -l app
+
+      # CentOS 7 은 EOL 되어 Docker Hub 아카이브에만 남아 있다.
+      # 이미지 pull 실패가 릴리스를 막지 않도록 이 항목만 비차단으로 둔다.
+      - name: Run on ${{ matrix.image }}
+        continue-on-error: ${{ matrix.image == 'centos:7' }}
+        run: |
+          docker run --rm -v "$PWD/app":/opt/onefs-s3:ro "${{ matrix.image }}" \
+            sh -c 'set -e
+              grep ^PRETTY_NAME= /etc/os-release || true
+              echo "glibc  : $(getconf GNU_LIBC_VERSION)"
+              echo "python3: $(command -v python3 || echo "not installed")"
+              /opt/onefs-s3/onefs-s3 --help > /dev/null
+              echo "OK: runs without a system Python"'
+
+  # ---------------------------------------------------------------------------
+  # Windows 바이너리도 동일하게 단독 실행을 검증한다.
+  # ---------------------------------------------------------------------------
+  verify-windows:
+    needs: build-windows
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64
+          path: dl
+
+      - name: Extract and run
+        shell: pwsh
+        run: |
+          $zip = (Get-ChildItem dl\*.zip)[0].FullName
+          Expand-Archive -Path $zip -DestinationPath app
+          $exe = (Get-ChildItem -Recurse -Filter onefs-s3.exe app)[0].FullName
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { throw "--help failed" }
+          Write-Host "OK: runs without a system Python"
+
+  # ---------------------------------------------------------------------------
+  # v* 태그 push 시에만 GitHub Release 생성
+  # ---------------------------------------------------------------------------
+  release:
+    if: github.ref_type == 'tag'
+    needs: [ version, verify-linux, verify-windows ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+          merge-multiple: true
+
+      - name: Write release notes
+        run: |
+          ls -l dl
+          cat > notes.md <<'NOTES'
+          ## 설치
+
+          대상 서버에 **Python 설치가 필요하지 않습니다.** 아카이브를 풀고 바로 실행하세요.
+
+          | 파일 | 대상 |
+          | --- | --- |
+          | `*-windows-x64.zip` | Windows Server 2016 이상 / Windows 10·11 (x64) |
+          | `*-linux-x86_64.tar.gz` | RHEL·CentOS 7/8/9, Ubuntu 14.04 이상 (x86_64) |
+
+          Linux 바이너리는 glibc 2.17(CentOS 7) 환경에서 빌드되어
+          CentOS 7 · AlmaLinux 8/9 · Ubuntu 20.04/22.04/24.04 에서 실행 검증을 마쳤습니다.
+
+          ```bash
+          tar -xzf onefs-s3-*-linux-x86_64.tar.gz
+          cd onefs-s3-*-linux-x86_64
+          cp config.json.example config.json   # 값을 환경에 맞게 수정
+          ./onefs-s3 test
+          ```
+
+          무결성 검증에는 함께 배포되는 `.sha256` 파일을 사용하세요.
+          NOTES
+
+      - name: Create release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${APP_NAME} ${VERSION}" \
+            --notes-file notes.md \
+            dl/*

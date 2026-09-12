@@ -7,3 +7,6 @@ dist/
 logs/
 config.json
 certs/*.key
+
+# CI/로컬 빌드가 공유하는 spec 은 버전 관리 대상
+!packaging/*.spec
