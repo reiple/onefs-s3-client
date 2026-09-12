@@ -14,13 +14,12 @@ permissions:
 env:
   PYTHON_VERSION: '3.12'
   APP_NAME: onefs-s3
-  # glibc 2.28 (RHEL 8 바이너리 호환) 기반 빌드 이미지.
-  # 여기서 만든 바이너리는 RHEL/CentOS 8·9, Ubuntu 20.04+ 에서 동작한다.
-  #
-  # manylinux 이미지를 쓰지 않는 이유: 해당 CPython 은 휠 빌드 전용이라
-  # --enable-shared 없이 빌드되어 libpython3.12.so 가 없고, PyInstaller 가
-  # "Python was built without a shared library" 로 실패한다.
-  LINUX_BUILD_IMAGE: almalinux:8
+  # glibc 2.17 (CentOS 7 기반) 빌드 이미지.
+  # 여기서 만든 바이너리는 RHEL/CentOS 7·8·9, Ubuntu 14.04+ 에서 동작한다.
+  # 이미지에 포함된 /opt/python 의 CPython 은 --enable-shared 가 아니라 쓸 수 없고,
+  # 인터프리터는 python-build-standalone 을 내려받아 쓴다.
+  # 자세한 배경은 packaging/build_linux_container.sh 주석 참고.
+  LINUX_BUILD_IMAGE: quay.io/pypa/manylinux2014_x86_64
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -111,7 +110,7 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  # Linux x86_64 빌드 (AlmaLinux 8 컨테이너 = glibc 2.28)
+  # Linux x86_64 빌드 (manylinux2014 컨테이너 = glibc 2.17)
   #
   # `container:` 키 대신 docker run 을 쓰는 이유:
   #   컨테이너 안에서 실행되는 것은 빌드뿐이고 checkout 은 호스트에서 끝내,
@@ -126,12 +125,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build inside manylinux container
+      - name: Build inside glibc 2.17 container
         run: |
           docker run --rm \
             -v "$PWD":/io -w /io \
             -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-            "$MANYLINUX_IMAGE" \
+            "$LINUX_BUILD_IMAGE" \
             bash /io/packaging/build_linux_container.sh
 
       - name: Stage release package
@@ -164,7 +163,8 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - 'almalinux:8'   # RHEL 8 / CentOS 8   (glibc 2.28, 빌드 기준선)
+          - 'centos:7'      # CentOS 7 / RHEL 7   (glibc 2.17, 빌드 기준선)
+          - 'almalinux:8'   # RHEL 8 / CentOS 8   (glibc 2.28)
           - 'almalinux:9'   # RHEL 9              (glibc 2.34)
           - 'ubuntu:20.04'  #                     (glibc 2.31)
           - 'ubuntu:22.04'  #                     (glibc 2.35)
@@ -242,11 +242,10 @@ jobs:
           | 파일 | 대상 |
           | --- | --- |
           | `*-windows-x64.zip` | Windows Server 2016 이상 / Windows 10·11 (x64) |
-          | `*-linux-x86_64.tar.gz` | RHEL·CentOS 8/9, Ubuntu 20.04 이상 (x86_64) |
+          | `*-linux-x86_64.tar.gz` | RHEL·CentOS 7/8/9, Ubuntu 14.04 이상 (x86_64) |
 
-          Linux 바이너리는 glibc 2.28(RHEL 8 호환) 환경에서 빌드되어
-          AlmaLinux 8/9 · Ubuntu 20.04/22.04/24.04 에서 실행 검증을 마쳤습니다.
-          CentOS 7 / RHEL 7(glibc 2.17)은 지원 대상이 아닙니다.
+          Linux 바이너리는 glibc 2.17(CentOS 7) 환경에서 빌드되어
+          CentOS 7 · AlmaLinux 8/9 · Ubuntu 20.04/22.04/24.04 에서 실행 검증을 마쳤습니다.
 
           ```bash
           tar -xzf onefs-s3-*-linux-x86_64.tar.gz
